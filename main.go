@@ -22,6 +22,7 @@ var emailDir string
 var telegramBotToken string
 var telegramChatID string
 var listenAddr string
+var port string
 
 const telegramMessageLimit = 4096
 const telegramTruncationNotice = "\n\n[message truncated]"
@@ -81,8 +82,9 @@ func emailBody(env *enmime.Envelope) string {
 func emailSummary(env *enmime.Envelope) string {
 	messageID := headerValue(env, "Message-ID", "(missing)")
 	return fmt.Sprintf(
-		`from=%q subject=%q message_id=%q attachments=%d`,
+		`from=%q to=%q subject=%q message_id=%q attachments=%d`,
 		headerValue(env, "From", "(unknown sender)"),
+		headerValue(env, "To", "(unknown receiver)"),
 		headerValue(env, "Subject", "(no subject)"),
 		messageID,
 		len(env.Attachments),
@@ -105,8 +107,9 @@ func truncateTelegramMessage(message string) string {
 
 func buildTelegramMessage(env *enmime.Envelope) string {
 	message := fmt.Sprintf(
-		"From: %s\nSubject: %s\n\n%s",
+		"From: %s\nTo: %s\nSubject: %s\n\n%s",
 		headerValue(env, "From", "(unknown sender)"),
+		headerValue(env, "To", "(unknown receiver)"),
 		headerValue(env, "Subject", "(no subject)"),
 		emailBody(env),
 	)
@@ -254,18 +257,17 @@ func emailHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"ok":true}`))
 }
 
-func loadConfig() string {
+func loadConfig() {
 	webhookSecret = requiredEnv("WEBHOOK_SECRET")
 	telegramBotToken = requiredEnv("TELEGRAM_BOT_TOKEN")
 	telegramChatID = requiredEnv("TELEGRAM_CHAT_ID")
 	emailDir = requiredEnv("EMAIL_DIR")
 	listenAddr = optionalEnv("LISTEN_ADDR", defaultListenAddr)
-
-	return optionalEnv("PORT", defaultPort)
+	port = optionalEnv("PORT", defaultPort)
 }
 
 func main() {
-	port := loadConfig()
+	loadConfig()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/email/notify", emailHandler)
