@@ -1,0 +1,121 @@
+# msgbot
+
+<img align="right" src="./doggo.jpg" width="200px" title="avatar of my dog created by iforgot which llm">
+
+A self-hosted program that receives raw email over HTTP, forwards the email body to Telegram chat, while saving received messages to disk.
+
+**Requirement**:
+- Valid domain managed by cloudflare
+- Public server (VPS)
+- Time or fixation for configuring Cloudflare
+
+## Configuration
+
+The program runs as a service and reads configuration from environment variables:
+
+- executable `~/.local/bin/msgbot`
+- config file `~/.config/msgbot/config.env`
+
+The program receives emails (`WEBHOOK_SECRET`), tell the bot (`TELEGRAM_BOT_TOKEN`) to forward them to chat (`TELEGRAM_CHAT_ID`). 
+
+Set in `config.env`:
+
+- `WEBHOOK_SECRET`
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+- `EMAIL_DIR`. Must be a user writable absolute path
+- `LISTEN_ADDR`. Defaults to `127.0.0.1` (Optional)
+- `PORT`. Defaults to `8181` (Optional)
+
+Ideally terminate HTTPS in TLS proxy (Nginx, Caddy, etc) and keep `msgbot` bound to localhost.
+
+## Local run
+
+Load the file and start the service:
+
+```bash
+set -a
+. ./config.env
+set +a
+go run .
+```
+
+The webhook listens on `http://127.0.0.1:8181/email/notify` by default and expects header `X-Webhook-Secret`.
+
+## Deploy as systemd service
+
+Build and install into your user account:
+
+```bash
+go build -o msgbot .
+mkdir -p ~/.local/bin ~/.config/msgbot ~/.config/systemd/user ~/msgbot/mail
+install -m 0755 msgbot ~/.local/bin/msgbot
+cp config.env ~/.config/msgbot/config.env
+cp deploy/msgbot.service ~/.config/systemd/user/msgbot.service
+```
+
+If you want the service to start at boot even when you are logged out, enable lingering for your user:
+
+```bash
+sudo loginctl enable-linger "$USER"
+```
+
+Then start the user service:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now msgbot
+```
+
+Useful commands:
+
+```bash
+systemctl --user status msgbot
+journalctl --user -u msgbot -f
+systemctl --user restart msgbot
+```
+
+## Logging
+
+This part is WIP.
+Current logs are in the user journal, viewed with `journalctl --user -u msgbot`.
+
+- request rejections
+- parse failures
+- Telegram delivery failures
+- email save results
+- one-line success summaries
+
+## Email ingress config
+
+The example `worker.js` can be used as the Cloudflare Email Routing ingress that POSTs raw RFC822 bytes to the bot.
+
+In addition to the `WEBHOOK_SECRET`, the `SERVER_ENDPOINT` should be set to `http://{DOMAIN}/email/notify`.
+
+### Reverse proxy behind cloudflare
+
+Setting up reverse proxy behind cloudflare requires additional setup.
+
+- Create the Origin CA cert in [Cloudflare](https://developers.cloudflare.com/ssl/origin-configuration/origin-ca/)
+- Copy them into server, e.g. `/etc/ssl/cloudflare/origin.crt`, `/etc/ssl/cloudflare/private.key`
+- Ensure read permission for proxy
+- Configure proxy to use the certificates
+
+Example using Caddy to proxy the https traffic to msgbot:
+
+```caddyfile
+example.com {
+    tls /etc/ssl/cloudflare/origin.crt /etc/ssl/cloudflare/private.key
+    reverse_proxy /email/notify localhost:8181
+}
+```
+
+## Plan
+
+- [x] Basic forwarding
+- [x] TLS with proxied cloudflare
+- [ ] fix memory usage
+- [ ] configurable email path
+- [ ] add bot command
+- [ ] add proper logging
+- [ ] HTML render on demand

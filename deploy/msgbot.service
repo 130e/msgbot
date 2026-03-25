@@ -1,0 +1,14 @@
+[Unit]
+Description=Email to Telegram forwarding service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/msgbot/config.env
+ExecStart=%h/.local/bin/msgbot
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target
