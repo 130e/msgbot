@@ -130,4 +130,5 @@ example.com {
 - [ ] HTML render on server as fallback
 - [x] API agent summary
 - [ ] Chatbot
-- [ ] bot message formatting for readability
+- [x] bot message formatting for readability
+- [ ] proper escaping and truncating with markdown

@@ -37,9 +37,11 @@ func testEnvelope(from string, subject string, text string, html string) *enmime
 	return env
 }
 
-type fakeTelegramSender struct {
-	err      error
-	messages []string
+type fakeSender struct {
+	err          error
+	messages     []string
+	failureErr   error
+	failureNotes []string
 }
 
 type fakeSummarizer struct {
@@ -49,9 +51,14 @@ type fakeSummarizer struct {
 	summarizeFunc func(string) (string, error)
 }
 
-func (f *fakeTelegramSender) SendMessage(_ context.Context, message string) error {
+func (f *fakeSender) SendMessage(_ context.Context, message string) error {
 	f.messages = append(f.messages, message)
 	return f.err
+}
+
+func (f *fakeSender) LogFailure(err error, summary string) {
+	f.failureErr = err
+	f.failureNotes = append(f.failureNotes, summary)
 }
 
 func (f *fakeSummarizer) Summarize(_ context.Context, body string) (string, error) {
@@ -127,7 +134,7 @@ func TestSaveEmailWritesExactRawMessageToUniqueEMLFile(t *testing.T) {
 	}
 }
 
-func TestReplaceURLsWithPlaceholdersReusesTokensAndRestoresURLs(t *testing.T) {
+func TestReplaceURLsWithPlaceholdersReusesTokensAndRendersHTMLLinks(t *testing.T) {
 	body := "Verify here: https://example.com/verify?token=abc.\nRead more: example.com/help/reset.\nRepeat: https://example.com/verify?token=abc"
 
 	replaced, placeholderToURL := replaceURLsWithPlaceholders(body)
@@ -138,32 +145,48 @@ func TestReplaceURLsWithPlaceholdersReusesTokensAndRestoresURLs(t *testing.T) {
 	if strings.Contains(replaced, "example.com/help/reset") {
 		t.Fatalf("replaceURLsWithPlaceholders() = %q, want help URL replaced", replaced)
 	}
-	if strings.Count(replaced, "[[MSG_URL_001]]") != 2 {
+	if strings.Count(replaced, "MSGURL001TOKEN") != 2 {
 		t.Fatalf("replaceURLsWithPlaceholders() = %q, want repeated URL to reuse placeholder", replaced)
 	}
-	if strings.Count(replaced, "[[MSG_URL_002]]") != 1 {
+	if strings.Count(replaced, "MSGURL002TOKEN") != 1 {
 		t.Fatalf("replaceURLsWithPlaceholders() = %q, want second URL placeholder", replaced)
 	}
 
-	restored := restoreURLPlaceholders("Verify: [[MSG_URL_001]]", placeholderToURL)
-	if restored != "Verify: https://example.com/verify?token=abc" {
-		t.Fatalf("restoreURLPlaceholders() = %q, want restored verification URL", restored)
+	rendered := renderTelegramHTML("Verify: MSGURL001TOKEN", placeholderToURL)
+	if rendered != `Verify: <a href="https://example.com/verify?token=abc">example.com/...</a>` {
+		t.Fatalf("renderTelegramHTML() = %q, want rendered verification link", rendered)
 	}
 }
 
 func TestReplaceURLsWithPlaceholdersAvoidsPlaceholderCollisions(t *testing.T) {
-	body := "Already present [[MSG_URL_001]] and actual link https://example.com/verify?token=abc"
+	body := "Already present MSGURL001TOKEN and actual link https://example.com/verify?token=abc"
 
 	replaced, placeholderToURL := replaceURLsWithPlaceholders(body)
 
-	if strings.Contains(replaced, "[[MSG_URL_001]] and actual link [[MSG_URL_001]]") {
+	if strings.Contains(replaced, "MSGURL001TOKEN and actual link MSGURL001TOKEN") {
 		t.Fatalf("replaceURLsWithPlaceholders() = %q, want alternate placeholder format", replaced)
 	}
-	if !strings.Contains(replaced, "[[MSG_URL_1_001]]") {
+	if !strings.Contains(replaced, "MSGURLV1001TOKEN") {
 		t.Fatalf("replaceURLsWithPlaceholders() = %q, want collision-safe placeholder", replaced)
 	}
-	if got := restoreURLPlaceholders("[[MSG_URL_1_001]]", placeholderToURL); got != "https://example.com/verify?token=abc" {
-		t.Fatalf("restoreURLPlaceholders() = %q, want restored collision-safe placeholder", got)
+	if got := renderTelegramHTML("MSGURLV1001TOKEN", placeholderToURL); got != `<a href="https://example.com/verify?token=abc">example.com/...</a>` {
+		t.Fatalf("renderTelegramHTML() = %q, want rendered collision-safe placeholder", got)
+	}
+}
+
+func TestBuildEmailMessageEscapesHTMLAndLinkifiesURLs(t *testing.T) {
+	env := testEnvelope("alerts@example.com", `Status <now>`, "ignored", "")
+
+	message := buildEmailMessage(env, `Use <tag> & review https://example.com/verify?token=abc.`, nil)
+
+	if !strings.Contains(message, "Subject: Status &lt;now&gt;") {
+		t.Fatalf("buildEmailMessage() = %q, want escaped subject", message)
+	}
+	if !strings.Contains(message, "Use &lt;tag&gt; &amp; review") {
+		t.Fatalf("buildEmailMessage() = %q, want escaped body text", message)
+	}
+	if !strings.Contains(message, `<a href="https://example.com/verify?token=abc">example.com/...</a>.`) {
+		t.Fatalf("buildEmailMessage() = %q, want linked URL with punctuation outside anchor", message)
 	}
 }
 
@@ -181,7 +204,7 @@ func TestNewEmailHandlerReturnsOKAndSavesEmail(t *testing.T) {
 			return "Login code is 123456.", nil
 		},
 	}
-	sender := &fakeTelegramSender{}
+	sender := &fakeSender{}
 	raw := "From: alerts@example.com\r\nTo: bot@example.com\r\nSubject: Status\r\n\r\nHello team\r\n"
 
 	req := httptest.NewRequest(http.MethodPost, "/email/notify", strings.NewReader(raw))
@@ -224,7 +247,7 @@ func TestNewEmailHandlerRejectsInvalidSecret(t *testing.T) {
 		EmailDir:      t.TempDir(),
 	}
 	summarizer := &fakeSummarizer{}
-	sender := &fakeTelegramSender{}
+	sender := &fakeSender{}
 
 	req := httptest.NewRequest(http.MethodPost, "/email/notify", strings.NewReader("hello"))
 	req.Header.Set("X-Webhook-Secret", "wrong")
@@ -246,7 +269,7 @@ func TestNewEmailHandlerReturnsBadGatewayOnTelegramFailure(t *testing.T) {
 		EmailDir:      t.TempDir(),
 	}
 	summarizer := &fakeSummarizer{summary: "Summarized text."}
-	sender := &fakeTelegramSender{err: errors.New("telegram sendMessage failed with status 500: upstream down")}
+	sender := &fakeSender{err: errors.New("telegram sendMessage failed with status 500: upstream down")}
 	raw := "From: alerts@example.com\r\nTo: bot@example.com\r\nSubject: Status\r\n\r\nHello team\r\n"
 
 	req := httptest.NewRequest(http.MethodPost, "/email/notify", strings.NewReader(raw))
@@ -258,6 +281,12 @@ func TestNewEmailHandlerReturnsBadGatewayOnTelegramFailure(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("newEmailHandler() status = %d, want %d", rec.Code, http.StatusBadGateway)
 	}
+	if sender.failureErr == nil {
+		t.Fatal("LogFailure() was not called on send failure")
+	}
+	if len(sender.failureNotes) != 1 {
+		t.Fatalf("LogFailure() calls = %d, want 1", len(sender.failureNotes))
+	}
 }
 
 func TestNewEmailHandlerFallsBackToRawBodyWhenSummarizerFails(t *testing.T) {
@@ -266,7 +295,7 @@ func TestNewEmailHandlerFallsBackToRawBodyWhenSummarizerFails(t *testing.T) {
 		EmailDir:      t.TempDir(),
 	}
 	summarizer := &fakeSummarizer{err: errors.New("anthropic timeout")}
-	sender := &fakeTelegramSender{}
+	sender := &fakeSender{}
 	raw := "From: alerts@example.com\r\nTo: bot@example.com\r\nSubject: Status\r\n\r\nVerify here: https://example.com/verify?token=abc\r\n"
 
 	req := httptest.NewRequest(http.MethodPost, "/email/notify", strings.NewReader(raw))
@@ -281,10 +310,10 @@ func TestNewEmailHandlerFallsBackToRawBodyWhenSummarizerFails(t *testing.T) {
 	if len(sender.messages) != 1 {
 		t.Fatalf("SendMessage() calls = %d, want 1", len(sender.messages))
 	}
-	if !strings.Contains(sender.messages[0], "https://example.com/verify?token=abc") {
-		t.Fatalf("telegram message = %q, want raw body fallback", sender.messages[0])
+	if !strings.Contains(sender.messages[0], `<a href="https://example.com/verify?token=abc">example.com/...</a>`) {
+		t.Fatalf("telegram message = %q, want linked raw body fallback", sender.messages[0])
 	}
-	if strings.Contains(sender.messages[0], "[[MSG_URL_") {
+	if strings.Contains(sender.messages[0], "MSGURL") {
 		t.Fatalf("telegram message = %q, should not leak URL placeholders after summarizer failure", sender.messages[0])
 	}
 }
@@ -294,7 +323,7 @@ func TestNewEmailHandlerUsesRawBodyWhenAnthropicDisabled(t *testing.T) {
 		WebhookSecret: "secret",
 		EmailDir:      t.TempDir(),
 	}
-	sender := &fakeTelegramSender{}
+	sender := &fakeSender{}
 	raw := "From: alerts@example.com\r\nTo: bot@example.com\r\nSubject: Status\r\n\r\nHello team\r\n"
 
 	req := httptest.NewRequest(http.MethodPost, "/email/notify", strings.NewReader(raw))
@@ -326,13 +355,13 @@ func TestNewEmailHandlerRestoresURLPlaceholdersInSummary(t *testing.T) {
 			if strings.Contains(body, verifyURL) || strings.Contains(body, infoURL) {
 				t.Fatalf("Summarize() body = %q, want URLs replaced with placeholders", body)
 			}
-			if !strings.Contains(body, "[[MSG_URL_001]]") || !strings.Contains(body, "[[MSG_URL_002]]") {
+			if !strings.Contains(body, "MSGURL001TOKEN") || !strings.Contains(body, "MSGURL002TOKEN") {
 				t.Fatalf("Summarize() body = %q, want placeholderized URLs", body)
 			}
-			return "Popeyes email verification\n\nAction needed: Verify your email.\nClick to verify: [[MSG_URL_001]]", nil
+			return "Popeyes email verification\n\nAction needed: Verify your email.\nClick to verify: MSGURL001TOKEN", nil
 		},
 	}
-	sender := &fakeTelegramSender{}
+	sender := &fakeSender{}
 	raw := fmt.Sprintf("From: Popeyes <offers@m.popeyes.com>\r\nTo: bot@example.com\r\nSubject: You're Popeyes-official! Let's get you logged in.\r\n\r\nWelcome to Popeyes.\r\nVerify your email: %s\r\nMore info: %s\r\n", verifyURL, infoURL)
 
 	req := httptest.NewRequest(http.MethodPost, "/email/notify", strings.NewReader(raw))
@@ -347,10 +376,10 @@ func TestNewEmailHandlerRestoresURLPlaceholdersInSummary(t *testing.T) {
 	if len(sender.messages) != 1 {
 		t.Fatalf("SendMessage() calls = %d, want 1", len(sender.messages))
 	}
-	if !strings.Contains(sender.messages[0], verifyURL) {
-		t.Fatalf("telegram message = %q, want restored verification URL", sender.messages[0])
+	if !strings.Contains(sender.messages[0], fmt.Sprintf(`<a href="%s">ablink.m.popeyes.com/...</a>`, verifyURL)) {
+		t.Fatalf("telegram message = %q, want rendered verification URL", sender.messages[0])
 	}
-	if strings.Contains(sender.messages[0], "[[MSG_URL_") {
+	if strings.Contains(sender.messages[0], "MSGURL") {
 		t.Fatalf("telegram message = %q, should not leak URL placeholders", sender.messages[0])
 	}
 }

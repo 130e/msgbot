@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -15,6 +17,8 @@ import (
 )
 
 const emptyBodyNotice = "[email has no text body]"
+const urlPlaceholderFormat = "MSGURL%03dTOKEN"
+const urlPlaceholderVariantFormat = "MSGURLV%d%%03dTOKEN"
 
 var bodyURLPattern = regexp.MustCompile(`(?:https?://|www\.|[A-Za-z0-9.-]+\.[A-Za-z]{2,}/)\S+`)
 
@@ -104,9 +108,9 @@ func replaceURLsWithPlaceholders(body string) (string, map[string]string) {
 
 func chooseURLPlaceholderFormat(body string, count int) string {
 	for variant := 0; ; variant++ {
-		format := "[[MSG_URL_%03d]]"
+		format := urlPlaceholderFormat
 		if variant > 0 {
-			format = fmt.Sprintf("[[MSG_URL_%d_%%03d]]", variant)
+			format = fmt.Sprintf(urlPlaceholderVariantFormat, variant)
 		}
 
 		collision := false
@@ -134,11 +138,129 @@ func splitTrailingURLPunctuation(candidate string) (string, string) {
 	return candidate[:cut], candidate[cut:]
 }
 
-func restoreURLPlaceholders(body string, placeholderToURL map[string]string) string {
-	for placeholder, url := range placeholderToURL {
-		body = strings.ReplaceAll(body, placeholder, url)
+func formatURLLabel(rawURL string) string {
+	href := rawURL
+	if !strings.Contains(href, "://") {
+		href = "https://" + rawURL
 	}
-	return body
+
+	parsed, err := neturl.Parse(href)
+	if err != nil {
+		return rawURL
+	}
+
+	host := parsed.Hostname()
+	if host == "" {
+		return rawURL
+	}
+
+	label := host
+	if parsed.Path != "" && parsed.Path != "/" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		label += "/..."
+	}
+
+	return label
+}
+
+func formatURLHref(rawURL string) string {
+	if strings.Contains(rawURL, "://") {
+		return rawURL
+	}
+
+	return "https://" + rawURL
+}
+
+func buildTelegramHTMLLink(rawURL string) string {
+	href := formatURLHref(rawURL)
+	label := formatURLLabel(rawURL)
+	return fmt.Sprintf(`<a href="%s">%s</a>`, html.EscapeString(href), html.EscapeString(label))
+}
+
+func nextURLPlaceholder(text string, start int, placeholderToURL map[string]string) (int, int, string, bool) {
+	bestStart := len(text)
+	bestEnd := 0
+	var bestURL string
+	found := false
+
+	for placeholder, url := range placeholderToURL {
+		relative := strings.Index(text[start:], placeholder)
+		if relative < 0 {
+			continue
+		}
+
+		matchStart := start + relative
+		if !found || matchStart < bestStart {
+			bestStart = matchStart
+			bestEnd = matchStart + len(placeholder)
+			bestURL = url
+			found = true
+		}
+	}
+
+	return bestStart, bestEnd, bestURL, found
+}
+
+func renderTelegramHTML(text string, placeholderToURL map[string]string) string {
+	var builder strings.Builder
+	index := 0
+
+	for index < len(text) {
+		urlStart, urlEnd, rawURL, hasURL := 0, 0, "", false
+		if loc := bodyURLPattern.FindStringIndex(text[index:]); loc != nil {
+			urlStart = index + loc[0]
+			urlEnd = index + loc[1]
+			rawURL = text[urlStart:urlEnd]
+			hasURL = true
+		}
+
+		placeholderStart, placeholderEnd, placeholderURL, hasPlaceholder := nextURLPlaceholder(text, index, placeholderToURL)
+
+		switch {
+		case hasPlaceholder && (!hasURL || placeholderStart <= urlStart):
+			builder.WriteString(html.EscapeString(text[index:placeholderStart]))
+			builder.WriteString(buildTelegramHTMLLink(placeholderURL))
+			index = placeholderEnd
+		case hasURL:
+			builder.WriteString(html.EscapeString(text[index:urlStart]))
+
+			url, suffix := splitTrailingURLPunctuation(rawURL)
+			if url == "" {
+				builder.WriteString(html.EscapeString(rawURL))
+			} else {
+				builder.WriteString(buildTelegramHTMLLink(url))
+				builder.WriteString(html.EscapeString(suffix))
+			}
+
+			index = urlEnd
+		default:
+			builder.WriteString(html.EscapeString(text[index:]))
+			index = len(text)
+		}
+	}
+
+	return builder.String()
+}
+
+func visibleTelegramLength(message string) int {
+	length := 0
+	inTag := false
+	for _, r := range message {
+		switch {
+		case r == '<':
+			inTag = true
+		case r == '>' && inTag:
+			inTag = false
+		case !inTag:
+			length++
+		}
+	}
+	return length
+}
+
+func appendClosingTags(builder *strings.Builder, openAnchors int) {
+	for ; openAnchors > 0; openAnchors-- {
+		builder.WriteString("</a>")
+	}
 }
 
 func containsAnyURLPlaceholder(body string, placeholderToURL map[string]string) bool {
@@ -175,7 +297,20 @@ func saveEmail(emailDir string, raw []byte) (string, error) {
 	return path, nil
 }
 
-func newEmailHandler(cfg Config, summarizer Summarizer, sender TelegramSender) http.HandlerFunc {
+func buildEmailMessage(env *enmime.Envelope, body string, placeholderToURL map[string]string) string {
+	var builder strings.Builder
+	builder.WriteString("From: ")
+	builder.WriteString(renderTelegramHTML(headerValue(env, "From", "(unknown sender)"), nil))
+	builder.WriteString("\nTo: ")
+	builder.WriteString(renderTelegramHTML(headerValue(env, "To", "(unknown receiver)"), nil))
+	builder.WriteString("\nSubject: ")
+	builder.WriteString(renderTelegramHTML(headerValue(env, "Subject", "(no subject)"), nil))
+	builder.WriteString("\n\n")
+	builder.WriteString(renderTelegramHTML(body, placeholderToURL))
+	return truncateTelegramMessage(builder.String())
+}
+
+func newEmailHandler(cfg Config, summarizer Summarizer, sender Sender) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -219,7 +354,8 @@ func newEmailHandler(cfg Config, summarizer Summarizer, sender TelegramSender) h
 
 		summary := emailSummary(env)
 		body := emailBody(env)
-		telegramBody := body
+		messageBody := body
+		messagePlaceholders := map[string]string(nil)
 		if body != emptyBodyNotice {
 			summaryInput := body
 			placeholderToURL := map[string]string(nil)
@@ -233,16 +369,16 @@ func newEmailHandler(cfg Config, summarizer Summarizer, sender TelegramSender) h
 					if !containsAnyURLPlaceholder(summaryText, placeholderToURL) {
 						log.Printf("Summarizer omitted all %d URL placeholders for email %s", len(placeholderToURL), summary)
 					}
-					summaryText = restoreURLPlaceholders(summaryText, placeholderToURL)
+					messagePlaceholders = placeholderToURL
 				}
-				telegramBody = summaryText
+				messageBody = summaryText
 			}
 		}
 
-		telegramMessage := buildTelegramMessage(env, telegramBody)
-		if err := sender.SendMessage(r.Context(), telegramMessage); err != nil {
-			logTelegramFailure(err, summary)
-			http.Error(w, "Failed to deliver message to Telegram", http.StatusBadGateway)
+		message := buildEmailMessage(env, messageBody, messagePlaceholders)
+		if err := sender.SendMessage(r.Context(), message); err != nil {
+			sender.LogFailure(err, summary)
+			http.Error(w, "Sender failed to deliver message", http.StatusBadGateway)
 			return
 		}
 

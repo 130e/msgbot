@@ -74,14 +74,6 @@ func loadConfig() (Config, error) {
 	}, nil
 }
 
-func newSummarizer(cfg Config) Summarizer {
-	if cfg.AnthropicAPIKey == "" {
-		return passthroughSummarizer{}
-	}
-
-	return newClaudeAgent(cfg.AnthropicAPIKey, cfg.AnthropicModel, nil)
-}
-
 func newServer(cfg Config, handler http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              net.JoinHostPort(cfg.ListenAddr, cfg.Port),
@@ -99,15 +91,10 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc(
-		"/email/notify",
-		newEmailHandler(
-			cfg,
-			newSummarizer(cfg),
-			newTelegramBot(cfg.TelegramBotToken, cfg.TelegramChatID, nil),
-		),
-	)
+	mux, err := newMux(cfg)
+	if err != nil {
+		log.Fatalf("Failed to build application: %v", err)
+	}
 
 	server := newServer(cfg, mux)
 

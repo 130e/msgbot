@@ -58,7 +58,16 @@ func TestClaudeAgentSummarizeSendsExpectedRequest(t *testing.T) {
 	if !ok || !strings.Contains(systemBlock["text"].(string), "terse, readable Telegram chat message") {
 		t.Fatalf("request system block = %#v, want system prompt text", systemBlocks[0])
 	}
-	if !strings.Contains(systemBlock["text"].(string), "[[MSG_URL_001]]") {
+	if !strings.Contains(systemBlock["text"].(string), "Return plain text only.") {
+		t.Fatalf("request system block = %#v, want plain text instructions", systemBlocks[0])
+	}
+	if !strings.Contains(systemBlock["text"].(string), "Do not use Markdown, HTML tags") {
+		t.Fatalf("request system block = %#v, want no-markup instructions", systemBlocks[0])
+	}
+	if strings.Contains(systemBlock["text"].(string), "simple Telegram Markdown") {
+		t.Fatalf("request system block = %#v, should not mention Markdown formatting instructions", systemBlocks[0])
+	}
+	if !strings.Contains(systemBlock["text"].(string), "MSGURL001TOKEN") {
 		t.Fatalf("request system block = %#v, want placeholder preservation instructions", systemBlocks[0])
 	}
 

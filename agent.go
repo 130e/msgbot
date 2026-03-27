@@ -14,17 +14,14 @@ import (
 const defaultAnthropicModel = "claude-haiku-4-5"
 
 var mailPrompt = []string{"Rewrite the email body into a terse, readable Telegram chat message.",
-	// "Prefer one short sentence, use two only if needed.",
+	"Return plain text only.",
+	"Do not use Markdown, HTML tags, or any other markup.",
 	"Preserve concrete facts like login codes, verification links, dates, deadlines, and requested actions.",
-	"Preserve any placeholder tokens like [[MSG_URL_001]] exactly as written when they are relevant; never replace them with generic phrases.",
+	"Preserve any placeholder tokens like MSGURL001TOKEN exactly as written when they are relevant; never alter, escape, rename, or replace them with generic phrases.",
 	"Omit greetings, signatures, and filler.",
-	"Do not invent facts. Return plain text only."}
+	"Do not invent facts."}
 
 var defaultAnthropicHTTPClient = &http.Client{Timeout: 20 * time.Second}
-
-type Summarizer interface {
-	Summarize(context.Context, string) (string, error)
-}
 
 type passthroughSummarizer struct{}
 

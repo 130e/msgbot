@@ -1,17 +1,17 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
-	"github.com/jhillyerd/enmime"
+	telegrambot "github.com/go-telegram/bot"
+	"github.com/go-telegram/bot/models"
 )
 
 const telegramMessageLimit = 4096
@@ -19,37 +19,33 @@ const telegramTruncationNotice = "\n\n[message truncated]"
 
 var defaultTelegramHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
-type TelegramSender interface {
-	SendMessage(context.Context, string) error
-}
-
-type TelegramBot struct {
-	token  string
+type TelegramSender struct {
 	chatID string
-	client *http.Client
+	client *telegrambot.Bot
 }
 
-type telegramSendResponse struct {
-	OK          bool   `json:"ok"`
-	Description string `json:"description"`
-	ErrorCode   int    `json:"error_code"`
-}
-
-func newTelegramBot(token string, chatID string, client *http.Client) *TelegramBot {
+func newTelegramSender(token string, chatID string, client *http.Client) (*TelegramSender, error) {
 	if client == nil {
 		client = defaultTelegramHTTPClient
 	}
 
-	return &TelegramBot{
-		token:  token,
-		chatID: chatID,
-		client: client,
+	botClient, err := telegrambot.New(
+		token,
+		telegrambot.WithSkipGetMe(),
+		telegrambot.WithHTTPClient(10*time.Second, client),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("build telegram bot: %w", err)
 	}
+
+	return &TelegramSender{
+		chatID: chatID,
+		client: botClient,
+	}, nil
 }
 
 func truncateTelegramMessage(message string) string {
-	runes := []rune(message)
-	if len(runes) <= telegramMessageLimit {
+	if visibleTelegramLength(message) <= telegramMessageLimit {
 		return message
 	}
 
@@ -58,74 +54,69 @@ func truncateTelegramMessage(message string) string {
 		maxContentLength = 0
 	}
 
-	return string(runes[:maxContentLength]) + telegramTruncationNotice
+	var builder strings.Builder
+	visibleCount := 0
+	openAnchors := 0
+
+	for index := 0; index < len(message); {
+		if message[index] == '<' {
+			tagEnd := strings.IndexByte(message[index:], '>')
+			if tagEnd < 0 {
+				break
+			}
+
+			tag := message[index : index+tagEnd+1]
+			builder.WriteString(tag)
+			switch {
+			case strings.HasPrefix(tag, "<a "):
+				openAnchors++
+			case tag == "</a>" && openAnchors > 0:
+				openAnchors--
+			}
+			index += tagEnd + 1
+			continue
+		}
+
+		r, size := utf8.DecodeRuneInString(message[index:])
+		if r == utf8.RuneError && size == 1 {
+			break
+		}
+		if visibleCount >= maxContentLength {
+			break
+		}
+
+		builder.WriteString(message[index : index+size])
+		visibleCount++
+		index += size
+	}
+
+	appendClosingTags(&builder, openAnchors)
+	builder.WriteString(telegramTruncationNotice)
+	return builder.String()
 }
 
-func buildTelegramMessage(env *enmime.Envelope, body string) string {
-	message := fmt.Sprintf(
-		"From: %s\nTo: %s\nSubject: %s\n\n%s",
-		headerValue(env, "From", "(unknown sender)"),
-		headerValue(env, "To", "(unknown receiver)"),
-		headerValue(env, "Subject", "(no subject)"),
-		body,
-	)
-	return truncateTelegramMessage(message)
-}
-
-func (b *TelegramBot) SendMessage(ctx context.Context, message string) error {
-	payload, err := json.Marshal(map[string]string{
-		"chat_id": b.chatID,
-		"text":    message,
+func (b *TelegramSender) SendMessage(ctx context.Context, message string) error {
+	_, err := b.client.SendMessage(ctx, &telegrambot.SendMessageParams{
+		ChatID:    b.chatID,
+		Text:      message,
+		ParseMode: models.ParseModeHTML,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal telegram payload: %w", err)
-	}
-
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", b.token)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
-	if err != nil {
-		return fmt.Errorf("build telegram request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := b.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("post telegram message: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return fmt.Errorf("read telegram response: %w", err)
-	}
-
-	var telegramResp telegramSendResponse
-	if len(body) > 0 {
-		if err := json.Unmarshal(body, &telegramResp); err != nil {
-			return fmt.Errorf("decode telegram response: %w", err)
-		}
-	}
-
-	if resp.StatusCode != http.StatusOK || !telegramResp.OK {
-		description := strings.TrimSpace(telegramResp.Description)
-		if description == "" {
-			description = strings.TrimSpace(string(body))
-		}
-		if description == "" {
-			description = http.StatusText(resp.StatusCode)
-		}
-		return fmt.Errorf("telegram sendMessage failed with status %d: %s", resp.StatusCode, description)
+		return fmt.Errorf("send telegram message: %w", err)
 	}
 
 	return nil
 }
 
-func logTelegramFailure(err error, summary string) {
-	message := err.Error()
+func isPermanentTelegramError(err error) bool {
+	return errors.Is(err, telegrambot.ErrorBadRequest) ||
+		errors.Is(err, telegrambot.ErrorUnauthorized) ||
+		errors.Is(err, telegrambot.ErrorForbidden)
+}
+
+func (b *TelegramSender) LogFailure(err error, summary string) {
 	switch {
-	case strings.Contains(message, "status 400"),
-		strings.Contains(message, "status 401"),
-		strings.Contains(message, "status 403"):
+	case isPermanentTelegramError(err):
 		log.Printf("Permanent Telegram delivery failure %s: %v", summary, err)
 	default:
 		log.Printf("Transient Telegram delivery failure %s: %v", summary, err)
