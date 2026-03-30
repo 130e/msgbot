@@ -3,6 +3,7 @@ module github.com/130e/msgbot
 go 1.25.5
 
 require (
+	github.com/BurntSushi/toml v1.4.0
 	github.com/anthropics/anthropic-sdk-go v1.27.1
 	github.com/go-telegram/bot v1.20.0
 	github.com/jaytaylor/html2text v0.0.0-20230321000545-74c2419ad056

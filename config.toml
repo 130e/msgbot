@@ -1,0 +1,31 @@
+[core]
+shutdown_timeout = "10s"
+
+[modules.mail]
+listen_addr = "127.0.0.1"
+port = 8181
+path = "/email/notify"
+webhook_secret = "replace-me"
+email_dir = "/home/your-user/msgbot/mail"
+
+[modules.telegram]
+bot_token = "123456789:replace-me"
+chat_id = "-1001234567890"
+
+[modules.agent]
+# type = "passthrough"
+type = "anthropic"
+
+[modules.agent.anthropic]
+api_key = "replace-me"
+model = "claude-haiku-4-5"
+
+[tasks.forwardmail]
+enabled = true
+
+[tasks.chat]
+enabled = false
+context_max_messages = 24
+context_window = "12h"
+max_reply_messages = 2
+agent_max_tokens = 2048
