@@ -170,6 +170,15 @@ func TestResolveDefaultsAndValidation(t *testing.T) {
 	if resolved.agentMaxTokens != agent.DefaultChatMaxTokens {
 		t.Fatalf("agentMaxTokens = %d, want %d", resolved.agentMaxTokens, agent.DefaultChatMaxTokens)
 	}
+	if resolved.agentModel != "" {
+		t.Fatalf("agentModel = %q, want empty string", resolved.agentModel)
+	}
+	if resolved.webSearchEnabled {
+		t.Fatal("webSearchEnabled = true, want false by default")
+	}
+	if resolved.webSearchMaxUses != defaultWebSearchMaxUses {
+		t.Fatalf("webSearchMaxUses = %d, want %d", resolved.webSearchMaxUses, defaultWebSearchMaxUses)
+	}
 
 	cases := []Config{
 		{ContextMaxMessages: -1},
@@ -177,6 +186,7 @@ func TestResolveDefaultsAndValidation(t *testing.T) {
 		{ContextWindow: "0s"},
 		{MaxReplyMessages: -1},
 		{AgentMaxTokens: -1},
+		{WebSearchMaxUses: -1},
 	}
 	for _, cfg := range cases {
 		if _, err := cfg.resolve(); err == nil {
@@ -194,6 +204,9 @@ func TestHandleUsesConversationTranscriptAndStoresBotReplies(t *testing.T) {
 			contextWindow:      12 * time.Hour,
 			maxReplyMessages:   2,
 			agentMaxTokens:     321,
+			agentModel:         "claude-sonnet-4-6",
+			webSearchEnabled:   true,
+			webSearchMaxUses:   6,
 		},
 		agent:    agent,
 		telegram: telegram,
@@ -270,6 +283,15 @@ func TestHandleUsesConversationTranscriptAndStoresBotReplies(t *testing.T) {
 	}
 	if agent.requests[0].MaxTokens != 321 {
 		t.Fatalf("first max tokens = %d, want 321", agent.requests[0].MaxTokens)
+	}
+	if agent.requests[0].Model != "claude-sonnet-4-6" {
+		t.Fatalf("first model = %q, want %q", agent.requests[0].Model, "claude-sonnet-4-6")
+	}
+	if !agent.requests[0].WebSearchEnabled {
+		t.Fatal("first webSearchEnabled = false, want true")
+	}
+	if agent.requests[0].WebSearchMaxUses != 6 {
+		t.Fatalf("first webSearchMaxUses = %d, want 6", agent.requests[0].WebSearchMaxUses)
 	}
 
 	wantSecondTranscript := strings.Join([]string{

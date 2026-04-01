@@ -128,6 +128,33 @@ func TestNewRejectsInvalidChatConfig(t *testing.T) {
 	}
 }
 
+func TestNewAllowsChatWebSearchWithoutModelValidation(t *testing.T) {
+	app, err := New(Config{
+		Modules: ModuleConfig{
+			Agent: agent.Config{
+				Type: agent.TypeClaude,
+				Claude: agent.ClaudeConfig{
+					Model: "claude-haiku-4-5",
+				},
+			},
+			Telegram: telegram.Config{BotToken: "token"},
+		},
+		Tasks: TaskConfig{
+			Chat: chat.Config{
+				Enabled:          true,
+				AgentModel:       "claude-haiku-4-5",
+				WebSearchEnabled: true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if app == nil {
+		t.Fatal("app = nil, want non-nil app")
+	}
+}
+
 func TestRunLogsModuleRuntimeErrorsAndContinuesUntilCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -14,9 +14,9 @@ chat_id = "-1001234567890"
 
 [modules.agent]
 # type = "passthrough"
-type = "anthropic"
+type = "claude"
 
-[modules.agent.anthropic]
+[modules.agent.claude]
 api_key = "replace-me"
 model = "claude-haiku-4-5"
 
@@ -29,3 +29,5 @@ context_max_messages = 24
 context_window = "12h"
 max_reply_messages = 2
 agent_max_tokens = 2048
+web_search_enabled = false
+web_search_max_uses = 5

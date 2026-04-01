@@ -21,6 +21,7 @@ const (
 	defaultContextMaxMessage = 24
 	defaultMaxReplyMessages  = 2
 	defaultContextWindow     = 12 * time.Hour
+	defaultWebSearchMaxUses  = 5
 	botSpeaker               = "bot"
 )
 
@@ -30,6 +31,9 @@ type Config struct {
 	ContextWindow      string `toml:"context_window"`
 	MaxReplyMessages   int    `toml:"max_reply_messages"`
 	AgentMaxTokens     int64  `toml:"agent_max_tokens"`
+	AgentModel         string `toml:"agent_model"`
+	WebSearchEnabled   bool   `toml:"web_search_enabled"`
+	WebSearchMaxUses   int64  `toml:"web_search_max_uses"`
 }
 
 type resolvedConfig struct {
@@ -37,6 +41,9 @@ type resolvedConfig struct {
 	contextWindow      time.Duration
 	maxReplyMessages   int
 	agentMaxTokens     int64
+	agentModel         string
+	webSearchEnabled   bool
+	webSearchMaxUses   int64
 }
 
 type chatAgent interface {
@@ -88,15 +95,10 @@ func New(cfg Config, agentModule *agent.Module, telegramModule *telegrammodule.M
 
 func (c Config) resolve() (resolvedConfig, error) {
 	contextMaxMessages := c.ContextMaxMessages
-	if contextMaxMessages == 0 {
+	if contextMaxMessages <= 0 {
 		contextMaxMessages = defaultContextMaxMessage
 	}
-	if contextMaxMessages < 0 {
-		return resolvedConfig{}, fmt.Errorf("tasks.chat.context_max_messages must be greater than 0")
-	}
-	if contextMaxMessages == 0 {
-		return resolvedConfig{}, fmt.Errorf("tasks.chat.context_max_messages must be greater than 0")
-	}
+	log.Printf("tasks.chat.context_max_messages set to %d", contextMaxMessages)
 
 	contextWindow := defaultContextWindow
 	if strings.TrimSpace(c.ContextWindow) != "" {
@@ -109,6 +111,7 @@ func (c Config) resolve() (resolvedConfig, error) {
 		}
 		contextWindow = duration
 	}
+	log.Printf("tasks.chat.context_max_messages set to %d", contextMaxMessages)
 
 	maxReplyMessages := c.MaxReplyMessages
 	if maxReplyMessages == 0 {
@@ -132,11 +135,25 @@ func (c Config) resolve() (resolvedConfig, error) {
 		return resolvedConfig{}, fmt.Errorf("tasks.chat.agent_max_tokens must be greater than 0")
 	}
 
+	webSearchMaxUses := c.WebSearchMaxUses
+	if webSearchMaxUses == 0 {
+		webSearchMaxUses = defaultWebSearchMaxUses
+	}
+	if webSearchMaxUses < 0 {
+		return resolvedConfig{}, fmt.Errorf("tasks.chat.web_search_max_uses must be greater than 0")
+	}
+	if webSearchMaxUses == 0 {
+		return resolvedConfig{}, fmt.Errorf("tasks.chat.web_search_max_uses must be greater than 0")
+	}
+
 	return resolvedConfig{
 		contextMaxMessages: contextMaxMessages,
 		contextWindow:      contextWindow,
 		maxReplyMessages:   maxReplyMessages,
 		agentMaxTokens:     agentMaxTokens,
+		agentModel:         strings.TrimSpace(c.AgentModel),
+		webSearchEnabled:   c.WebSearchEnabled,
+		webSearchMaxUses:   webSearchMaxUses,
 	}, nil
 }
 
@@ -185,8 +202,11 @@ func (t *task) Handle(ctx context.Context, update telegrammodule.Update) error {
 	}
 
 	reply, err := t.agent.ReplyChat(ctx, agent.ChatRequest{
-		Transcript: transcript,
-		MaxTokens:  t.cfg.agentMaxTokens,
+		Transcript:       transcript,
+		MaxTokens:        t.cfg.agentMaxTokens,
+		Model:            t.cfg.agentModel,
+		WebSearchEnabled: t.cfg.webSearchEnabled,
+		WebSearchMaxUses: t.cfg.webSearchMaxUses,
 	})
 	if err != nil {
 		log.Printf("Failed to generate chat reply %s: %v", messageSummary(message), err)

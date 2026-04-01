@@ -38,13 +38,13 @@ The checked-in `config.toml` shows the expected shape.
 
 - `[modules.mail]` configures the webhook listener, shared secret, and `.eml` save directory
 - `[modules.telegram]` configures the bot token and the default destination chat used by `forwardmail`
-- `[modules.agent]` chooses `passthrough` or `anthropic`
+- `[modules.agent]` chooses `passthrough` or `claude`
 - `[tasks.forwardmail]` enables the mail-to-Telegram workflow
-- `[tasks.chat]` enables the group-chat reply workflow and tunes chat context/reply limits
+- `[tasks.chat]` enables the group-chat reply workflow, chat-specific agent overrides, and chat context/reply limits
 
 Note: 
 `modules.agent.type = "passthrough"` basically means echo.
-To enable real LLM agent, switch it to `"anthropic"` and fill in `[modules.agent.anthropic]`.
+To enable real LLM agent, switch it to `"claude"` and fill in `[modules.agent.claude]`.
 
 ## Local run
 
@@ -151,3 +151,13 @@ Available `[tasks.chat]` settings:
 - `context_window`: age limit for chat context, default `"12h"`
 - `max_reply_messages`: maximum number of Telegram messages used for one bot reply, default `2`
 - `agent_max_tokens`: token budget passed to the agent for one reply, default `2048`
+- `agent_model`: optional Anthropic model override used only for chat replies; when empty, chat uses `modules.agent.anthropic.model`
+- `web_search_enabled`: enable Claude web search for chat replies
+- `web_search_max_uses`: max Claude web-search tool calls for one reply, default `5`
+
+When `web_search_enabled=true`:
+
+- Anthropic web search must be enabled in Claude Console for the workspace before deployment
+- msgbot only passes the Claude web-search tool to the API and lets Anthropic decide whether the current model can use it
+
+Chat replies with Claude web search append a plain-text `Sources:` footer using cited URLs returned by Anthropic.
